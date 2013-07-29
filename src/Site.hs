@@ -10,8 +10,12 @@ module Site
 
 ------------------------------------------------------------------------------
 import           Control.Applicative
-import           Data.ByteString (ByteString)
+import           Control.Concurrent.MVar
+import           Control.Monad
+import           Control.Monad.IO.Class ( liftIO )
+import qualified Data.ByteString as B
 import           Data.Maybe
+import           Data.Text.Encoding
 import qualified Data.Text as T
 import           Snap.Core
 import           Snap.Snaplet
@@ -19,12 +23,26 @@ import           Snap.Snaplet.Auth
 import           Snap.Snaplet.Auth.Backends.JsonFile
 import           Snap.Snaplet.Heist
 import           Snap.Snaplet.Session.Backends.CookieSession
+import           Snap.Snaplet.AcidState ( Update, Query, Acid,
+                 HasAcid (getAcidStore), makeAcidic, update, query, acidInit )
 import           Snap.Util.FileServe
+import           Snap.Util.FileUploads
 import           Heist
 import qualified Heist.Interpreted as I
 ------------------------------------------------------------------------------
 import           Application
 
+data AWSUpload = AWSUpload
+    { _filename  :: String
+    , _bytesDone :: Int
+    , _bytesLeft :: Int
+    }
+
+data PersistentState = PersistentState
+    { _uploads :: [AWSUpload]
+    }
+
+type PSVar = MVar PersistentState
 
 ------------------------------------------------------------------------------
 -- | Render login form
@@ -58,15 +76,52 @@ handleNewUser = method GET handleForm <|> method POST handleFormSubmit
     handleForm = render "new_user"
     handleFormSubmit = registerUser "login" "password" >> redirect "/"
 
+------------------------------------------------------------------------------
+-- | When a user wants to upload.
+handleUpload :: PSVar -> Handler App (AuthManager App) ()
+handleUpload psVar = method GET handleGetUpload <|> method POST handlePostUpload
+    where policy           = defaultUploadPolicy
+          processor        = undefined
+          handleGetUpload  = render "upload"
+          tmp              = "uploads_tmp"
+          partPolicy _     = allowWithMaximumSize $ floor (1.074e9 :: Double)
+          userHdl          = handleUploadedFiles psVar
+          handlePostUpload = handleFileUploads tmp defaultUploadPolicy partPolicy userHdl
+--          handleStreamUpload = do _ <- handleMultipart policy processor
+--                                  return ()
+
+------------------------------------------------------------------------------
+-- | After a file has been uploaded.
+handleUploadedFiles :: PSVar -> [(PartInfo, Either PolicyViolationException FilePath)] -> Handler App (AuthManager App) ()
+handleUploadedFiles psVar fs = do msgs' <- liftIO $ msgs fs
+                                  liftIO $ print msgs'
+                                  render "uploaded"
+    where handleUploadedFile _ xs (_, Left e) =
+              return $ xs ++ [encodeUtf8 $ policyViolationExceptionReason e]
+          handleUploadedFile ps xs (p, Right f) = do
+              -- Create a new url to get upload updates from...
+              uplds <- takeMVar ps
+              let uplds' = PersistentState $ upld:_uploads uplds
+                  upld   = AWSUpload { _filename  = f
+                                     , _bytesDone = 0
+                                     , _bytesLeft = 0
+                                     }
+              putMVar psVar uplds'
+              liftIO $ print p
+              return $ xs ++ [encodeUtf8 $ T.append "File uploaded " $ T.pack f]
+          msgs = foldM (handleUploadedFile psVar) []
+
+
 
 ------------------------------------------------------------------------------
 -- | The application's routes.
-routes :: [(ByteString, Handler App App ())]
-routes = [ ("/login",    with auth handleLoginSubmit)
-         , ("/logout",   with auth handleLogout)
-         , ("/new_user", with auth handleNewUser)
-         , ("",          serveDirectory "static")
-         ]
+routes :: PSVar -> [(B.ByteString, Handler App App ())]
+routes psVar = [ ("/login",    with auth handleLoginSubmit)
+               , ("/logout",   with auth handleLogout)
+               , ("/new_user", with auth handleNewUser)
+               , ("/upload",   with auth $ handleUpload psVar)
+               , ("",          serveDirectory "static")
+               ]
 
 
 ------------------------------------------------------------------------------
@@ -82,7 +137,8 @@ app = makeSnaplet "app" "An snaplet example application." Nothing $ do
     -- you'll probably want to change this to a more robust auth backend.
     a <- nestSnaplet "auth" auth $
            initJsonFileAuthManager defAuthSettings sess "users.json"
-    addRoutes routes
+    ps <- liftIO $ newMVar $ PersistentState []
+    addRoutes $ routes ps
     addAuthSplices h auth
     return $ App h s a
 
