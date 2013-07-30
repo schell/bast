@@ -30,7 +30,6 @@ import           Snap.Util.FileUploads
 import           Heist
 import qualified Heist.Interpreted as I
 ------------------------------------------------------------------------------
---
 import           Application
 
 data AWSUpload = AWSUpload
