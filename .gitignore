@@ -2,3 +2,4 @@ bast
 *.sw*
 .DS_Store
 dist/**
+log/**
