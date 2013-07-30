@@ -77,6 +77,7 @@ handleNewUser = method GET handleForm <|> method POST handleFormSubmit
     handleForm = render "new_user"
     handleFormSubmit = registerUser "login" "password" >> redirect "/"
 
+
 ------------------------------------------------------------------------------
 -- | When a user wants to upload.
 handleUpload :: PSVar -> Handler App (AuthManager App) ()
