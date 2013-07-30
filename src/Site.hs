@@ -13,21 +13,20 @@ import           Control.Applicative
 import           Control.Concurrent.MVar
 import           Control.Monad
 import           Control.Monad.IO.Class ( liftIO )
-import qualified Data.ByteString as B
 import           Data.Maybe
 import           Data.Text.Encoding
-import qualified Data.Text as T
 import           Snap.Core
 import           Snap.Snaplet
 import           Snap.Snaplet.Auth
 import           Snap.Snaplet.Auth.Backends.JsonFile
 import           Snap.Snaplet.Heist
 import           Snap.Snaplet.Session.Backends.CookieSession
-import           Snap.Snaplet.AcidState ( Update, Query, Acid,
-                 HasAcid (getAcidStore), makeAcidic, update, query, acidInit )
+import           Snap.Snaplet.AcidState ( Update, Query, Acid, HasAcid (getAcidStore), makeAcidic, update, query, acidInit )
 import           Snap.Util.FileServe
 import           Snap.Util.FileUploads
 import           Heist
+import qualified Data.Text as T
+import qualified Data.ByteString as B
 import qualified Heist.Interpreted as I
 ------------------------------------------------------------------------------
 --
