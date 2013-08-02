@@ -24,6 +24,8 @@ import           Snap.Snaplet.Session.Backends.CookieSession
 import           Snap.Snaplet.AcidState ( Update, Query, Acid, HasAcid (getAcidStore), makeAcidic, update, query, acidInit )
 import           Snap.Util.FileServe
 import           Snap.Util.FileUploads
+import           System.Posix           ( rename, fileSize, getFileStatus )
+import           System.FilePath
 import           Heist
 import qualified Data.Text as T
 import qualified Data.ByteString as B
@@ -94,23 +96,36 @@ handleUpload psVar = method GET handleGetUpload <|> method POST handlePostUpload
 ------------------------------------------------------------------------------
 -- | After a file has been uploaded.
 handleUploadedFiles :: PSVar -> [(PartInfo, Either PolicyViolationException FilePath)] -> Handler App (AuthManager App) ()
-handleUploadedFiles psVar fs = do msgs' <- liftIO $ msgs fs
-                                  liftIO $ print msgs'
-                                  render "uploaded"
-    where handleUploadedFile _ xs (_, Left e) =
-              return $ xs ++ [encodeUtf8 $ policyViolationExceptionReason e]
-          handleUploadedFile ps xs (p, Right f) = do
-              -- Create a new url to get upload updates from...
-              uplds <- takeMVar ps
-              let uplds' = PersistentState $ upld:_uploads uplds
-                  upld   = AWSUpload { _filename  = f
-                                     , _bytesDone = 0
-                                     , _bytesLeft = 0
-                                     }
-              putMVar psVar uplds'
-              liftIO $ print p
-              return $ xs ++ [encodeUtf8 $ T.append "File uploaded " $ T.pack f]
-          msgs = foldM (handleUploadedFile psVar) []
+handleUploadedFiles _ [] = heistLocal (I.bindSplices msgs) $ render "uploaded"
+    where msgs = [("msg", I.textSplice "You must specify a file to upload.")]
+
+handleUploadedFiles _ [(_, Left e)] = heistLocal (I.bindSplices msgs) $ render "uploaded"
+    where msgs = [("msg", I.textSplice $ policyViolationExceptionReason e)]
+
+handleUploadedFiles psVar [(_,Right f)] =
+    do len <- liftIO $ fmap fileSize $ getFileStatus f
+       if len > 0
+         then do rename f $ replaceDirectory f "uploads"
+                 heistLocal (I.bindSplices [("msg", "Uploading...")]) $ render "uploaded"
+         else do let msgs = [("msg", I.textSplice "You must specify a file to upload.")]
+                 heistLocal (I.bindSplices msgs) $ render "uploaded"
+
+handleUploadedFiles _ _ = heistLocal (I.bindSplices msgs) $ render "uploaded"
+    where msgs = [("msg", I.textSplice "An unknown error occurred")]
+--    where handleUploadedFile _ xs (_, Left e) =
+--              return $ xs ++ [encodeUtf8 $ policyViolationExceptionReason e]
+--          handleUploadedFile ps xs (p, Right f) = do
+--              -- Create a new url to get upload updates from...
+--              uplds <- takeMVar ps
+--              let uplds' = PersistentState $ upld:_uploads uplds
+--                  upld   = AWSUpload { _filename  = f
+--                                     , _bytesDone = 0
+--                                     , _bytesLeft = 0
+--                                     }
+--              putMVar psVar uplds'
+--              liftIO $ print p
+--              return $ xs ++ [encodeUtf8 $ T.append "File uploaded " $ T.pack f]
+--          msgs = foldM (handleUploadedFile psVar) []
 
 
 ------------------------------------------------------------------------------
