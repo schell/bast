@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
 ------------------------------------------------------------------------------
 -- | This module is where all the routes and handlers are defined for your
@@ -10,11 +10,10 @@ module Site
 
 ------------------------------------------------------------------------------
 import           Control.Applicative
+import           Control.Concurrent     ( forkIO )
 import           Control.Concurrent.MVar
-import           Control.Monad
 import           Control.Monad.IO.Class ( liftIO )
 import           Data.Maybe
-import           Data.Text.Encoding
 import           Snap.Core
 import           Snap.Snaplet
 import           Snap.Snaplet.Auth
@@ -26,25 +25,29 @@ import           Snap.Util.FileServe
 import           Snap.Util.FileUploads
 import           System.Posix           ( rename, fileSize, getFileStatus )
 import           System.FilePath
-import           Heist
-import qualified Data.Text as T
-import qualified Data.ByteString as B
-import qualified Heist.Interpreted as I
+import qualified Data.Text             as T
+import qualified Data.ByteString       as B
+import qualified Data.ByteString.Char8 as C
+import qualified Heist.Interpreted     as I
 ------------------------------------------------------------------------------
---
 import           Application
 
-data AWSUpload = AWSUpload
-    { _filename  :: String
-    , _bytesDone :: Int
-    , _bytesLeft :: Int
+-- Stuff for TDP --
+data Hole = Hole
+hole = undefined
+-------------------
+
+------------------------------------------------------------------------------
+data Upload = Upload
+    { _filename   :: String
+    , _location   :: FilePath
+    , _bytesTotal :: Int
+    , _bytesDone  :: Int
     }
 
-data PersistentState = PersistentState
-    { _uploads :: [AWSUpload]
-    }
+newtype Uploads = Uploads [Upload]
 
-type PSVar = MVar PersistentState
+type UploadState = MVar Uploads
 
 ------------------------------------------------------------------------------
 -- | Render login form
@@ -81,7 +84,7 @@ handleNewUser = method GET handleForm <|> method POST handleFormSubmit
 
 ------------------------------------------------------------------------------
 -- | When a user wants to upload.
-handleUpload :: PSVar -> Handler App (AuthManager App) ()
+handleUpload :: UploadState -> Handler App (AuthManager App) ()
 handleUpload psVar = method GET handleGetUpload <|> method POST handlePostUpload
     where policy           = defaultUploadPolicy
           processor        = undefined
@@ -95,18 +98,30 @@ handleUpload psVar = method GET handleGetUpload <|> method POST handlePostUpload
 
 ------------------------------------------------------------------------------
 -- | After a file has been uploaded.
-handleUploadedFiles :: PSVar -> [(PartInfo, Either PolicyViolationException FilePath)] -> Handler App (AuthManager App) ()
+handleUploadedFiles :: UploadState -> [(PartInfo, Either PolicyViolationException FilePath)] -> Handler App (AuthManager App) ()
 handleUploadedFiles _ [] = heistLocal (I.bindSplices msgs) $ render "uploaded"
     where msgs = [("msg", I.textSplice "You must specify a file to upload.")]
 
 handleUploadedFiles _ [(_, Left e)] = heistLocal (I.bindSplices msgs) $ render "uploaded"
     where msgs = [("msg", I.textSplice $ policyViolationExceptionReason e)]
 
-handleUploadedFiles psVar [(_,Right f)] =
+handleUploadedFiles psVar [(PartInfo{..}, Right f)] =
     do len <- liftIO $ fmap fileSize $ getFileStatus f
-       if len > 0
-         then do rename f $ replaceDirectory f "uploads"
-                 heistLocal (I.bindSplices [("msg", "Uploading...")]) $ render "uploaded"
+       if len > 0 && isJust partFileName
+         then do let location = replaceDirectory f "uploads"
+                     msgs     = [ ("msg",  I.textSplice "Uploading...")
+                                , ("link", I.textSplice $ T.pack f)
+                                ]
+                     upload   = Upload { _filename   = C.unpack $ fromJust partFileName
+                                       , _location   = location
+                                       , _bytesTotal = fromIntegral len
+                                       , _bytesDone  = 0
+                                       }
+                 liftIO $ putStrLn $ f ++ " -> " ++ location
+                 liftIO $ rename f location
+                 _ <- liftIO $ forkIO $ uploadAWS psVar upload
+                 heistLocal (I.bindSplices msgs) $ render "uploaded"
+
          else do let msgs = [("msg", I.textSplice "You must specify a file to upload.")]
                  heistLocal (I.bindSplices msgs) $ render "uploaded"
 
@@ -127,10 +142,11 @@ handleUploadedFiles _ _ = heistLocal (I.bindSplices msgs) $ render "uploaded"
 --              return $ xs ++ [encodeUtf8 $ T.append "File uploaded " $ T.pack f]
 --          msgs = foldM (handleUploadedFile psVar) []
 
+uploadAWS _ _ = undefined
 
 ------------------------------------------------------------------------------
 -- | The application's routes.
-routes :: PSVar -> [(B.ByteString, Handler App App ())]
+routes :: UploadState -> [(B.ByteString, Handler App App ())]
 routes psVar = [ ("/login",    with auth handleLoginSubmit)
                , ("/logout",   with auth handleLogout)
                , ("/new_user", with auth handleNewUser)
@@ -152,7 +168,7 @@ app = makeSnaplet "app" "An snaplet example application." Nothing $ do
     -- you'll probably want to change this to a more robust auth backend.
     a <- nestSnaplet "auth" auth $
            initJsonFileAuthManager defAuthSettings sess "users.json"
-    ps <- liftIO $ newMVar $ PersistentState []
+    ps <- liftIO $ newMVar $ Uploads []
     addRoutes $ routes ps
     addAuthSplices h auth
     return $ App h s a

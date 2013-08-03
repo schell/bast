@@ -3,3 +3,5 @@ bast
 .DS_Store
 dist/**
 log/**
+uploads/**
+uploads_tmp/**
