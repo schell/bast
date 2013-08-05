@@ -8,7 +8,7 @@
     </tr>
     <tr>
       <td></td>
-      <td><input type="submit" value="${submitText}" /></td>
+      <td><button class="btn btn-success btn-large" type="submit" ><submitText/></button></td>
     </tr>
   </table>
 </form>

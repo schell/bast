@@ -1,3 +1,3 @@
 <apply template="base">
-    <msg/>
+    <status/>
 </apply>

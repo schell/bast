@@ -25,27 +25,36 @@ import           Snap.Util.FileServe
 import           Snap.Util.FileUploads
 import           System.Posix           ( rename, fileSize, getFileStatus )
 import           System.FilePath
-import qualified Data.Text             as T
-import qualified Data.ByteString       as B
-import qualified Data.ByteString.Char8 as C
-import qualified Heist.Interpreted     as I
+import qualified Data.Text              as T
+import qualified Data.ByteString        as B
+import qualified Data.ByteString.Char8  as C
+import qualified Heist.Interpreted      as I
+import qualified Data.Map               as M
+------------------------------------------------------------------------------
+import qualified Aws                    as Aws
+import qualified Aws.S3                 as S3
+import           Data.Conduit           ( ($$+-) )
+import           Data.Conduit.Binary    ( sinkFile, sinkLbs )
+import           Network.HTTP.Conduit   ( withManager, responseBody )
 ------------------------------------------------------------------------------
 import           Application
 
--- Stuff for TDP --
+-- | Stuff for TDP --
+------------------------------------------------------------------------------
 data Hole = Hole
 hole = undefined
--------------------
 
 ------------------------------------------------------------------------------
 data Upload = Upload
     { _filename   :: String
     , _location   :: FilePath
+    , _localId    :: String
     , _bytesTotal :: Int
     , _bytesDone  :: Int
-    }
+    , _status     :: String
+    } deriving (Show, Eq)
 
-newtype Uploads = Uploads [Upload]
+type Uploads = M.Map String Upload
 
 type UploadState = MVar Uploads
 
@@ -112,12 +121,14 @@ handleUploadedFiles psVar [(PartInfo{..}, Right f)] =
                      msgs     = [ ("msg",  I.textSplice "Uploading...")
                                 , ("link", I.textSplice $ T.pack f)
                                 ]
-                     upload   = Upload { _filename   = C.unpack $ fromJust partFileName
+                     name     = C.unpack $ fromJust partFileName
+                     upload   = Upload { _filename   = name
                                        , _location   = location
+                                       , _localId    = name -- For now, eventually BTC addy
                                        , _bytesTotal = fromIntegral len
                                        , _bytesDone  = 0
+                                       , _status     = "Starting upload..."
                                        }
-                 liftIO $ putStrLn $ f ++ " -> " ++ location
                  liftIO $ rename f location
                  _ <- liftIO $ forkIO $ uploadAWS psVar upload
                  heistLocal (I.bindSplices msgs) $ render "uploaded"
@@ -127,32 +138,70 @@ handleUploadedFiles psVar [(PartInfo{..}, Right f)] =
 
 handleUploadedFiles _ _ = heistLocal (I.bindSplices msgs) $ render "uploaded"
     where msgs = [("msg", I.textSplice "An unknown error occurred")]
---    where handleUploadedFile _ xs (_, Left e) =
---              return $ xs ++ [encodeUtf8 $ policyViolationExceptionReason e]
---          handleUploadedFile ps xs (p, Right f) = do
---              -- Create a new url to get upload updates from...
---              uplds <- takeMVar ps
---              let uplds' = PersistentState $ upld:_uploads uplds
---                  upld   = AWSUpload { _filename  = f
---                                     , _bytesDone = 0
---                                     , _bytesLeft = 0
---                                     }
---              putMVar psVar uplds'
---              liftIO $ print p
---              return $ xs ++ [encodeUtf8 $ T.append "File uploaded " $ T.pack f]
---          msgs = foldM (handleUploadedFile psVar) []
 
-uploadAWS _ _ = undefined
+------------------------------------------------------------------------------
+-- | Uploads our file to S3.
+-- https://github.com/aristidb/aws
+uploadAWS :: UploadState -> Upload -> IO ()
+uploadAWS upsVar up = do
+    let name = _localId up
+    ups <- takeMVar upsVar
+    putMVar upsVar (M.insert name up ups)
+    -- Set up some creds with a default config.
+    cfg <- Aws.baseConfiguration
+    let s3cfg  = Aws.defServiceConfig :: S3.S3Configuration Aws.NormalQuery
+        bucket = T.pack name
+    -- Set up a resource region with an available http manager.
+    withManager $ \mgr -> do
+        -- Create a request object with S3.getObject and runt the request.
+        gbr <- Aws.pureAws cfg s3cfg mgr $ S3.getBucket bucket
+        -- r   <- gbr $$+- sinkLbs
+        let f x = x { _status = show gbr }
+        ups' <- liftIO $ readMVar upsVar
+        _ <- liftIO $ swapMVar upsVar $ M.adjust f name ups'
+        return ()
+
+
+------------------------------------------------------------------------------
+-- | Get the status of an upload by key.
+getStatus :: UploadState -> Maybe String -> IO String
+getStatus upsVar mk = do
+    ups  <- liftIO $ readMVar upsVar
+    return $ maybe "You must specify an upload key." (f ups) mk
+        where f ups name = maybe
+                             ("The upload " ++ name ++ " is either complete or does not exist.")
+                             _status
+                             (M.lookup name ups)
+
+
+------------------------------------------------------------------------------
+-- | Check the status of an upload.
+handleStatus :: UploadState -> Handler App (AuthManager App) ()
+handleStatus upsVar = do
+    param  <- (C.unpack <$>) <$> getParam "key"
+    status <- liftIO $ getStatus upsVar param
+    heistLocal (I.bindSplices [("status", I.textSplice $ T.pack status)]) $ render "status"
+
+------------------------------------------------------------------------------
+-- | Check the status of all uploads.
+handleStatusAll :: UploadState -> Handler App (AuthManager App) ()
+handleStatusAll upsVar = do
+    ups <- liftIO $ readMVar upsVar
+    let status = T.pack $ show ups
+    heistLocal (I.bindSplices [("status", I.textSplice $ status)]) $ render "status"
+
 
 ------------------------------------------------------------------------------
 -- | The application's routes.
 routes :: UploadState -> [(B.ByteString, Handler App App ())]
-routes psVar = [ ("/login",    with auth handleLoginSubmit)
-               , ("/logout",   with auth handleLogout)
-               , ("/new_user", with auth handleNewUser)
-               , ("/upload",   with auth $ handleUpload psVar)
-               , ("",          serveDirectory "static")
-               ]
+routes upsVar = [ ("/login",    with auth handleLoginSubmit)
+                , ("/logout",   with auth handleLogout)
+                , ("/new_user", with auth handleNewUser)
+                , ("/upload",   with auth $ handleUpload upsVar)
+                , ("/status/:key", with auth $ handleStatus upsVar)
+                , ("/status-all", with auth $ handleStatusAll upsVar)
+                , ("",          serveDirectory "static")
+                ]
 
 
 ------------------------------------------------------------------------------
@@ -168,7 +217,7 @@ app = makeSnaplet "app" "An snaplet example application." Nothing $ do
     -- you'll probably want to change this to a more robust auth backend.
     a <- nestSnaplet "auth" auth $
            initJsonFileAuthManager defAuthSettings sess "users.json"
-    ps <- liftIO $ newMVar $ Uploads []
+    ps <- liftIO $ newMVar M.empty
     addRoutes $ routes ps
     addAuthSplices h auth
     return $ App h s a
